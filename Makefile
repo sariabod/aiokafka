@@ -1,8 +1,8 @@
 # Some simple testing tasks (sorry, UNIX only).
 
-FLAGS=
+FLAGS?=--maxfail=3
 SCALA_VERSION?=2.12
-KAFKA_VERSION?=2.1.0
+KAFKA_VERSION?=2.2.2
 DOCKER_IMAGE=aiolibs/kafka:$(SCALA_VERSION)_$(KAFKA_VERSION)
 DIFF_BRANCH=origin/master
 
@@ -15,20 +15,20 @@ flake:
 	flake8 aiokafka tests $$extra
 
 test: flake
-	py.test -s --no-print-logs --docker-image $(DOCKER_IMAGE) $(FLAGS) tests
+	py.test -s --show-capture=no --docker-image $(DOCKER_IMAGE) $(FLAGS) tests
 
 vtest: flake
-	py.test -s -v --docker-image $(DOCKER_IMAGE) $(FLAGS) tests
+	py.test -s -v --log-level INFO --docker-image $(DOCKER_IMAGE) $(FLAGS) tests
 
 cov cover coverage: flake
 	py.test -s --cov aiokafka --cov-report html --docker-image $(DOCKER_IMAGE) $(FLAGS) tests
 	@echo "open file://`pwd`/htmlcov/index.html"
 
 ci-test-unit:
-	py.test -s --cov aiokafka --cov-report html $(FLAGS) tests
+	py.test -s --log-level DEBUG --cov aiokafka --cov-report html $(FLAGS) tests
 
 ci-test-all:
-	py.test -s --cov aiokafka --cov-report html --docker-image $(DOCKER_IMAGE) $(FLAGS) tests
+	py.test -s -v --log-level DEBUG --cov aiokafka --cov-report html --docker-image $(DOCKER_IMAGE) $(FLAGS) tests
 
 coverage.xml: .coverage
 	coverage xml

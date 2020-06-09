@@ -53,8 +53,8 @@ class BaseCoordinator(object):
                 self._group_subscription is not None:
             metadata_snapshot = self._get_metadata_snapshot()
             if self._metadata_snapshot != metadata_snapshot:
-                log.debug("Metadata for topic has changed from %s to %s. ",
-                          self._metadata_snapshot, metadata_snapshot)
+                log.info("Metadata for topic has changed from %s to %s. ",
+                         self._metadata_snapshot, metadata_snapshot)
                 self._metadata_snapshot = metadata_snapshot
                 self._on_metadata_change()
 
@@ -99,8 +99,14 @@ class NoGroupCoordinator(BaseCoordinator):
         partitions = []
         for topic in self._subscription.subscription.topics:
             p_ids = self._cluster.partitions_for_topic(topic)
-            if not p_ids and check_unknown:
-                raise Errors.UnknownTopicOrPartitionError()
+            if not p_ids:
+                if check_unknown:
+                    raise Errors.UnknownTopicOrPartitionError()
+                else:
+                    # We probably just changed subscription during metadata
+                    # update. No problem, lets wait for the next metadata
+                    # update
+                    continue
             for p_id in p_ids:
                 partitions.append(TopicPartition(topic, p_id))
 
@@ -123,6 +129,7 @@ class NoGroupCoordinator(BaseCoordinator):
 
                 assignment = self._subscription.subscription.assignment
                 if assignment is None:
+
                     await self._subscription.wait_for_assignment()
                     continue
 
@@ -141,6 +148,10 @@ class NoGroupCoordinator(BaseCoordinator):
                     [assignment.unassign_future, event_waiter],
                     return_when=asyncio.FIRST_COMPLETED,
                     loop=self._loop)
+
+                if not event_waiter.done():
+                    event_waiter.cancel()
+                    event_waiter = None
 
         except asyncio.CancelledError:
             pass
@@ -296,7 +307,7 @@ class GroupCoordinator(BaseCoordinator):
 
     def check_errors(self):
         """ Check if coordinator is well and no authorization or unrecoverable
-        errors occured
+        errors occurred
         """
         if self._coordination_task.done():
             self._coordination_task.result()
@@ -450,6 +461,8 @@ class GroupCoordinator(BaseCoordinator):
 
         # update partition assignment
         self._subscription.assign_from_subscribed(assignment.partitions())
+        # The await bellow can change subscription, remember the ongoing one.
+        subscription = self._subscription.subscription
 
         # give the assignor a chance to update internal state
         # based on the received assignment
@@ -459,8 +472,7 @@ class GroupCoordinator(BaseCoordinator):
         # Callback can rely on something like ``Consumer.position()`` that
         # requires committed point to be refreshed.
         await self._stop_commit_offsets_refresh_task()
-        self.start_commit_offsets_refresh_task(
-            self._subscription.subscription.assignment)
+        self.start_commit_offsets_refresh_task(subscription.assignment)
 
         assigned = set(self._subscription.assigned_partitions())
         log.info("Setting newly assigned partitions %s for group %s",
@@ -600,7 +612,7 @@ class GroupCoordinator(BaseCoordinator):
                 if auto_assigned and self.need_rejoin(subscription):
                     new_assignment = await self.ensure_active_group(
                         subscription, assignment)
-                    if new_assignment is None:
+                    if new_assignment is None or not new_assignment.active:
                         continue
                     else:
                         assignment = new_assignment
@@ -829,7 +841,7 @@ class GroupCoordinator(BaseCoordinator):
             self._commit_refresh_routine(assignment), loop=self._loop)
 
     async def _stop_commit_offsets_refresh_task(self):
-        # The previous task should end after assinment changed
+        # The previous task should end after assignment changed
         if self._commit_refresh_task is not None:
             if not self._commit_refresh_task.done():
                 self._commit_refresh_task.cancel()
@@ -914,7 +926,7 @@ class GroupCoordinator(BaseCoordinator):
                         assignment, assignment.all_consumed_offsets())
             except Errors.KafkaError as error:
                 log.warning("Auto offset commit failed: %s", error)
-                if error.retriable:
+                if self._is_commit_retriable(error):
                     # Retry after backoff.
                     self._next_autocommit_deadline = \
                         self._loop.time() + backoff
@@ -926,6 +938,16 @@ class GroupCoordinator(BaseCoordinator):
             self._next_autocommit_deadline = now + interval
 
         return max(0, self._next_autocommit_deadline - self._loop.time())
+
+    def _is_commit_retriable(self, error):
+        # Java client raises CommitFailedError which is retriable and thus
+        # masks those 3. We raise error that we got explicitly, so treat them
+        # as retriable.
+        return error.retriable or isinstance(error, (
+            Errors.UnknownMemberIdError,
+            Errors.IllegalGenerationError,
+            Errors.RebalanceInProgressError
+        ))
 
     async def _maybe_do_last_autocommit(self, assignment):
         if not self._enable_auto_commit:
@@ -1023,7 +1045,8 @@ class GroupCoordinator(BaseCoordinator):
                         error_type.__name__)
                     errored[tp] = error_type()
                 elif error_type in (Errors.GroupCoordinatorNotAvailableError,
-                                    Errors.NotCoordinatorForGroupError):
+                                    Errors.NotCoordinatorForGroupError,
+                                    Errors.RequestTimedOutError):
                     log.info(
                         "OffsetCommit failed for group %s due to a"
                         " coordinator error (%s), will find new coordinator"

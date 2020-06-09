@@ -13,7 +13,7 @@ from aiokafka.errors import (
 from aiokafka.record.legacy_records import LegacyRecordBatchBuilder
 from aiokafka.structs import TopicPartition
 from aiokafka.util import (
-    INTEGER_MAX_VALUE, PY_36, commit_structure_validate
+    INTEGER_MAX_VALUE, PY_36, commit_structure_validate, get_running_loop
 )
 
 from .message_accumulator import MessageAccumulator
@@ -149,7 +149,7 @@ class AIOKafkaProducer(object):
             New in version 0.5.0.
         sasl_mechanism (str): Authentication mechanism when security_protocol
             is configured for SASL_PLAINTEXT or SASL_SSL. Valid values are:
-            PLAIN, GSSAPI. Default: PLAIN
+            PLAIN, GSSAPI, SCRAM-SHA-256, SCRAM-SHA-512. Default: PLAIN
         sasl_plain_username (str): username for sasl PLAIN authentication.
             Default: None
         sasl_plain_password (str): password for sasl PLAIN authentication.
@@ -170,7 +170,7 @@ class AIOKafkaProducer(object):
     _closed = None  # Serves as an uninitialized flag for __del__
     _source_traceback = None
 
-    def __init__(self, *, loop, bootstrap_servers='localhost',
+    def __init__(self, *, loop=None, bootstrap_servers='localhost',
                  client_id=None,
                  metadata_max_age_ms=300000, request_timeout_ms=40000,
                  api_version='auto', acks=_missing,
@@ -185,6 +185,9 @@ class AIOKafkaProducer(object):
                  sasl_plain_password=None, sasl_plain_username=None,
                  sasl_kerberos_service_name='kafka',
                  sasl_kerberos_domain_name=None):
+        if loop is None:
+            loop = get_running_loop()
+
         if acks not in (0, 1, -1, 'all', _missing):
             raise ValueError("Invalid ACKS parameter")
         if compression_type not in ('gzip', 'snappy', 'lz4', None):
@@ -296,7 +299,7 @@ class AIOKafkaProducer(object):
 
         if self._txn_manager is not None and self.client.api_version < (0, 11):
             raise UnsupportedVersionError(
-                "Idempotent producer available only for Broker vesion 0.11"
+                "Idempotent producer available only for Broker version 0.11"
                 " and above")
 
         await self._sender.start()
@@ -305,7 +308,7 @@ class AIOKafkaProducer(object):
         log.debug("Kafka producer started")
 
     async def flush(self):
-        """Wait untill all batches are Delivered and futures resolved"""
+        """Wait until all batches are Delivered and futures resolved"""
         await self._message_accumulator.flush()
 
     async def stop(self):
@@ -448,11 +451,11 @@ class AIOKafkaProducer(object):
 
     async def send_and_wait(
         self, topic, value=None, key=None, partition=None,
-        timestamp_ms=None
+        timestamp_ms=None, headers=None
     ):
         """Publish a message to a topic and wait the result"""
         future = await self.send(
-            topic, value, key, partition, timestamp_ms)
+            topic, value, key, partition, timestamp_ms, headers)
         return (await future)
 
     def create_batch(self):
@@ -555,6 +558,12 @@ class AIOKafkaProducer(object):
             formatted_offsets, group_id)
         fut = self._txn_manager.add_offsets_to_txn(formatted_offsets, group_id)
         await asyncio.shield(fut, loop=self._loop)
+
+    async def __aenter__(self):
+        await self.start()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.stop()
 
 
 class TransactionContext:

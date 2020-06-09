@@ -2,6 +2,7 @@ import os
 import re
 import platform
 import sys
+from distutils.command.bdist_rpm import bdist_rpm as _bdist_rpm
 from distutils.command.build_ext import build_ext
 from distutils.errors import (CCompilerError, DistutilsExecError,
                               DistutilsPlatformError)
@@ -67,10 +68,14 @@ extensions = [
 if USE_CYTHON:
     extensions = cythonize(extensions)
 
+class bdist_rpm(_bdist_rpm):
+    def _make_spec_file(self):
+        orig = super()._make_spec_file()
+        orig.insert(0, '%define debug_package %{nil}')
+        return orig
 
 class BuildFailed(Exception):
     pass
-
 
 class ve_build_ext(build_ext):
     # This class allows C extension building to fail.
@@ -89,7 +94,7 @@ class ve_build_ext(build_ext):
             raise BuildFailed()
 
 
-install_requires = ['kafka-python==1.4.6']
+install_requires = ['kafka-python>=2.0.0']
 
 PY_VER = sys.version_info
 
@@ -98,7 +103,7 @@ if PY_VER >= (3, 5):
 elif PY_VER >= (3, 4):
     install_requires.append('typing')
 else:
-    raise RuntimeError("aiokafka doesn't suppport Python earlier than 3.4")
+    raise RuntimeError("aiokafka doesn't support Python earlier than 3.4")
 
 
 def read(f):
@@ -151,7 +156,7 @@ args = dict(
     extras_require=extras_require,
     include_package_data=True,
     ext_modules=extensions,
-    cmdclass=dict(build_ext=ve_build_ext)
+    cmdclass=dict(build_ext=ve_build_ext, bdist_rpm=bdist_rpm)
 )
 
 try:

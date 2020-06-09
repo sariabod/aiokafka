@@ -16,7 +16,7 @@ from aiokafka.errors import (
 )
 from aiokafka.structs import TopicPartition
 from aiokafka.util import (
-    PY_36, commit_structure_validate
+    PY_36, commit_structure_validate, get_running_loop
 )
 from aiokafka import __version__
 
@@ -97,8 +97,9 @@ class AIOKafkaConsumer(object):
             errors. Default: 100.
         auto_offset_reset (str): A policy for resetting offsets on
             OffsetOutOfRange errors: 'earliest' will move to the oldest
-            available message, 'latest' will move to the most recent. Any
-            ofther value will raise the exception. Default: 'latest'.
+            available message, 'latest' will move to the most recent, and
+            'none' will raise an exception so you can handle this case.
+            Default: 'latest'.
         enable_auto_commit (bool): If true the consumer's offset will be
             periodically committed in the background. Default: True.
         auto_commit_interval_ms (int): milliseconds between automatic
@@ -198,7 +199,7 @@ class AIOKafkaConsumer(object):
 
         sasl_mechanism (str): Authentication mechanism when security_protocol
             is configured for SASL_PLAINTEXT or SASL_SSL. Valid values are:
-            PLAIN, GSSAPI. Default: PLAIN
+            PLAIN, GSSAPI, SCRAM-SHA-256, SCRAM-SHA-512. Default: PLAIN
         sasl_plain_username (str): username for sasl PLAIN authentication.
             Default: None
         sasl_plain_password (str): password for sasl PLAIN authentication.
@@ -213,7 +214,7 @@ class AIOKafkaConsumer(object):
     _closed = None  # Serves as an uninitialized flag for __del__
     _source_traceback = None
 
-    def __init__(self, *topics, loop,
+    def __init__(self, *topics, loop=None,
                  bootstrap_servers='localhost',
                  client_id='aiokafka-' + __version__,
                  group_id=None,
@@ -247,6 +248,9 @@ class AIOKafkaConsumer(object):
                  sasl_plain_username=None,
                  sasl_kerberos_service_name='kafka',
                  sasl_kerberos_domain_name=None):
+        if loop is None:
+            loop = get_running_loop()
+
         if max_poll_records is not None and (
                 not isinstance(max_poll_records, int) or max_poll_records < 1):
             raise ValueError("`max_poll_records` should be positive Integer")
@@ -693,7 +697,7 @@ class AIOKafkaConsumer(object):
     def last_poll_timestamp(self, partition):
         """ Returns the timestamp of the last poll of this partition (in ms).
         It is the last time `highwater` and `last_stable_offset` were
-        udpated. However it does not mean that new messages were received.
+        updated. However it does not mean that new messages were received.
 
         As with ``highwater()`` will not be available until some messages are
         consumed.
@@ -1053,6 +1057,15 @@ class AIOKafkaConsumer(object):
             self._subscription.subscribe(
                 topics=topics, listener=listener)
             self._client.set_topics(self._subscription.subscription.topics)
+            if self._group_id is None:
+                # We have reset the assignment, but client.set_topics will
+                # not always do a metadata update. We force it to do it even
+                # if metadata did not change. This will trigger a reassignment
+                # on NoGroupCoordinator, but only if snapshot did not change,
+                # thus we reset it too.
+                self._client.force_metadata_update()
+                if self._coordinator is not None:
+                    self._coordinator._metadata_snapshot = {}
             log.info("Subscribed to topic(s): %s", topics)
 
     def subscription(self):
@@ -1235,3 +1248,10 @@ class AIOKafkaConsumer(object):
                 raise err
             except RecordTooLargeError:
                 log.exception("error in consumer iterator: %s")
+
+    async def __aenter__(self):
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.stop()
